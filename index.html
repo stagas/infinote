@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Infinote</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#2563eb">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Infinote">
+
+  <!-- Favicons -->
+  <link rel="icon" href="favicon.ico" sizes="any">
+  <link rel="icon" href="favicon-16x16.png" sizes="16x16" type="image/png">
+  <link rel="icon" href="favicon-32x32.png" sizes="32x32" type="image/png">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <link rel="icon" href="android-chrome-192x192.png" sizes="192x192" type="image/png">
+  <link rel="icon" href="android-chrome-512x512.png" sizes="512x512" type="image/png">
+</head>
+
+<body>
+  <div id="viewport">
+    <div id="world"></div>
+  </div>
+
+  <div class="instructions">
+    <h3>Infinote</h3>
+    <ul>
+      <li>Click anywhere to create a note</li>
+      <li>Scroll to zoom in/out</li>
+      <li>Drag to pan around</li>
+      <li>Double click to fit view</li>
+      <li>Auto-saves everything</li>
+    </ul>
+  </div>
+
+  <div class="controls">
+    <button class="control-button reset-view-btn" onclick="resetView()" title="Fit all notes to view">
+      <span style="display: flex; align-items: center; justify-content: center; width: 100%; height: 100%;">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"
+          stroke-linecap="round" stroke-linejoin="round" style="display: block; margin: auto;">
+          <path d="M8 3H5a2 2 0 0 0-2 2v3" />
+          <path d="M21 8V5a2 2 0 0 0-2-2h-3" />
+          <path d="M3 16v3a2 2 0 0 0 2 2h3" />
+          <path d="M16 21h3a2 2 0 0 0 2-2v-3" />
+          <circle cx="12" cy="12" r="1" />
+        </svg>
+      </span>
+    </button>
+  </div>
+
+  <script src="script.js"></script>
+
+  <script>
+    // Register service worker for PWA functionality with update handling
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', function () {
+        navigator.serviceWorker.register('/sw.js')
+          .then(function (registration) {
+            console.log('SW registered: ', registration)
+
+            // Handle service worker updates
+            registration.addEventListener('updatefound', function () {
+              const newWorker = registration.installing
+              newWorker.addEventListener('statechange', function () {
+                if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
+                  console.log('New service worker available, will refresh on next visit')
+                }
+              })
+            })
+          })
+          .catch(function (registrationError) {
+            console.log('SW registration failed: ', registrationError)
+          })
+      })
+    }
+  </script>
+</body>
+
+</html>
