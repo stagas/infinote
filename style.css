@@ -130,6 +130,24 @@ body {
   border-color: rgba(0, 0, 0, 0.2);
 }
 
+/* Show controls on mobile when textarea is focused */
+@media (hover: none) and (pointer: coarse) {
+
+  .note-container:focus-within .delete-btn,
+  .note-container:focus-within .color-btn {
+    opacity: 1;
+  }
+
+  .note-container:focus-within .delete-btn:hover {
+    opacity: 1;
+  }
+
+  .note-container:focus-within .color-btn:hover {
+    opacity: 1;
+    border-color: rgba(0, 0, 0, 0.2);
+  }
+}
+
 .color-palette {
   position: absolute;
   top: 26px;
@@ -179,9 +197,10 @@ body {
   box-shadow: 0 6px 25px rgba(0, 0, 0, 0.2);
 }
 
+/*
 .note:active {
   transform: scale(1.02);
-}
+} */
 
 .note::placeholder {
   color: #999;
@@ -221,11 +240,17 @@ body {
   border: 1px solid rgba(255, 255, 255, 0.2);
 }
 
-.reset-view-btn:hover {
+.backup-btn {
+  background: rgba(255, 255, 255, 0.1) !important;
+  color: rgba(255, 255, 255, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+.reset-view-btn:hover,
+.backup-btn:hover {
   background: rgba(255, 255, 255, 0.2) !important;
   color: rgba(255, 255, 255, 0.9);
-  border-color: rgba(255, 255, 255, 0.3);
-  transform: translateY(-1px);
+  border: 1px solid rgba(255, 255, 255, 0.3);
 }
 
 .zoom-info {
@@ -278,4 +303,50 @@ body {
   position: absolute;
   left: 0;
   color: #ffd700;
+}
+
+.instructions p {
+  margin-bottom: 8px;
+  font-size: 13px;
+  opacity: 0.9;
+}
+
+/* Drag and drop overlay */
+#drop-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100dvw;
+  height: 100dvh;
+  background: rgba(0, 0, 0, 0.7);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  pointer-events: none;
+}
+
+.drop-message {
+  background: rgba(255, 255, 255, 0.95);
+  padding: 40px;
+  border-radius: 12px;
+  text-align: center;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+  backdrop-filter: blur(10px);
+}
+
+.drop-icon {
+  font-size: 48px;
+  margin-bottom: 16px;
+}
+
+.drop-message div:last-child {
+  font-size: 18px;
+  font-weight: 500;
+  color: #333;
+}
+
+#viewport.drag-over {
+  outline: 3px dashed rgba(255, 255, 255, 0.6);
+  outline-offset: -3px;
 }

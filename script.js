@@ -7,8 +7,15 @@ let state = {
   isDragging: false,
   dragStart: { x: 0, y: 0 },
   lastPan: { x: 0, y: 0 },
-  maxZIndex: 1
+  maxZIndex: 1,
 }
+
+// Note interaction state
+let currentNote = null
+let isResizingNote = false
+let isDraggingNote = false
+let noteDragData = null
+let noteResizeData = null
 
 // Click handling state
 let clickTimer = null
@@ -48,7 +55,7 @@ const world = document.getElementById('world')
 // Constants
 const MIN_ZOOM = 0.1
 const MAX_ZOOM = 5
-const ZOOM_FACTOR = 0.175
+const ZOOM_FACTOR = 0.05
 const STORAGE_KEY = 'infinote-state'
 
 let doubleTapDetected = false
@@ -59,7 +66,7 @@ async function init() {
   world.style.transition = 'none'
 
   try {
-    await initDB()
+    await initStorage()
     await loadState()
   } catch (e) {
     console.warn('Failed to initialize IndexedDB, falling back to localStorage:', e)
@@ -74,6 +81,9 @@ async function init() {
 
   // Handle instructions visibility
   handleInstructions()
+
+  // Check if backup reminder is needed
+  checkBackupReminder()
 
   // Re-enable transition after all notes are loaded and positioned
   // Wait two frames to ensure DOM is fully settled
@@ -137,9 +147,109 @@ function attachEventListeners() {
   viewport.addEventListener('touchend', handleTouchTap, { passive: false })
 
   // Tap-to-create-note detection for mobile
-  viewport.addEventListener('touchstart', handleViewportTouchStart, { passive: false })
-  viewport.addEventListener('touchmove', handleViewportTouchMove, { passive: false })
-  viewport.addEventListener('touchend', handleViewportTouchEnd, { passive: false })
+  viewport.addEventListener('touchstart', handleViewportTouchStart, {
+    passive: false,
+  })
+  viewport.addEventListener('touchmove', handleViewportTouchMove, {
+    passive: false,
+  })
+  viewport.addEventListener('touchend', handleViewportTouchEnd, {
+    passive: false,
+  })
+
+  // Global mouse handlers for note interactions
+  document.addEventListener('mousemove', handleGlobalMouseMove)
+  document.addEventListener('mouseup', handleGlobalMouseUp)
+
+  // Global touch handlers for note interactions
+  document.addEventListener('touchmove', handleGlobalTouchMove, {
+    passive: false,
+  })
+  document.addEventListener('touchend', handleGlobalTouchEnd, {
+    passive: false,
+  })
+
+  // Drag and drop backup import
+  viewport.addEventListener('dragover', handleDragOver, { passive: false })
+  viewport.addEventListener('drop', handleDrop, { passive: false })
+  viewport.addEventListener('dragenter', handleDragEnter, { passive: false })
+  viewport.addEventListener('dragleave', handleDragLeave, { passive: false })
+}
+
+// Drag and drop handlers for backup import
+let dragCounter = 0
+
+function handleDragEnter(e) {
+  e.preventDefault()
+  dragCounter++
+  if (dragCounter === 1) {
+    viewport.classList.add('drag-over')
+    showDropOverlay()
+  }
+}
+
+function handleDragLeave(e) {
+  e.preventDefault()
+  dragCounter--
+  if (dragCounter === 0) {
+    viewport.classList.remove('drag-over')
+    hideDropOverlay()
+  }
+}
+
+function handleDragOver(e) {
+  e.preventDefault()
+  e.dataTransfer.dropEffect = 'copy'
+}
+
+function handleDrop(e) {
+  e.preventDefault()
+  dragCounter = 0
+  viewport.classList.remove('drag-over')
+  hideDropOverlay()
+
+  const files = Array.from(e.dataTransfer.files)
+  const jsonFile = files.find(
+    file => file.type === 'application/json' || file.name.endsWith('.json'),
+  )
+
+  if (jsonFile) {
+    if (confirm('Import backup file? This will replace all current notes.')) {
+      importData(jsonFile)
+        .then(() => {
+          console.log('✅ Backup imported successfully')
+        })
+        .catch(error => {
+          console.error('❌ Failed to import backup:', error)
+          alert('Failed to import backup file. Please check the file format.')
+        })
+    }
+  } else {
+    alert('Please drop a JSON backup file.')
+  }
+}
+
+function showDropOverlay() {
+  let overlay = document.getElementById('drop-overlay')
+  if (!overlay) {
+    overlay = document.createElement('div')
+    overlay.id = 'drop-overlay'
+    overlay.innerHTML = `
+      <div class="drop-message">
+        <div class="drop-icon">📁</div>
+        <div>Drop backup file to import</div>
+      </div>
+    `
+    document.body.appendChild(overlay)
+  }
+  overlay.style.display = 'flex'
+}
+
+function hideDropOverlay() {
+  const overlay = document.getElementById('drop-overlay')
+  if (overlay) {
+    overlay.style.display = 'none'
+  }
 }
 
 // Mouse event handlers
@@ -179,7 +289,12 @@ function handleMouseUp(e) {
   const focusedTextarea = document.querySelector('textarea.note:focus')
 
   // If mouse didn't move much and no color picker is open, handle click with delay
-  if (deltaX < 5 && deltaY < 5 && (e.target === viewport || e.target === world) && !isColorPickerOpen) {
+  if (
+    deltaX < 5 &&
+    deltaY < 5 &&
+    (e.target === viewport || e.target === world) &&
+    !isColorPickerOpen
+  ) {
     if (focusedTextarea) {
       // Just blur the focused textarea instead of creating a new note
       focusedTextarea.blur()
@@ -240,7 +355,7 @@ function handleWheel(e) {
   const worldY = (mouseY - state.panY) / state.zoom
 
   // Update zoom
-  const zoomDelta = e.deltaY > 0 ? -ZOOM_FACTOR * state.zoom / 2 : ZOOM_FACTOR * state.zoom / 2
+  const zoomDelta = e.deltaY > 0 ? (-ZOOM_FACTOR * state.zoom) / 2 : (ZOOM_FACTOR * state.zoom) / 2
   const newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, state.zoom + zoomDelta))
 
   // Calculate new pan to keep mouse position constant in world space
@@ -265,8 +380,8 @@ function handleTouchStart(e) {
 
     // Initialize pinch center tracking
     const rect = viewport.getBoundingClientRect()
-    lastPinchCenter.x = ((touches[0].clientX + touches[1].clientX) / 2) - rect.left
-    lastPinchCenter.y = ((touches[0].clientY + touches[1].clientY) / 2) - rect.top
+    lastPinchCenter.x = (touches[0].clientX + touches[1].clientX) / 2 - rect.left
+    lastPinchCenter.y = (touches[0].clientY + touches[1].clientY) / 2 - rect.top
 
     e.preventDefault()
   } else if (touches.length === 1 && (e.target === viewport || e.target === world)) {
@@ -296,8 +411,8 @@ function handleTouchMove(e) {
 
       // Calculate center point of pinch
       const rect = viewport.getBoundingClientRect()
-      const centerX = ((touch1.clientX + touch2.clientX) / 2) - rect.left
-      const centerY = ((touch1.clientY + touch2.clientY) / 2) - rect.top
+      const centerX = (touch1.clientX + touch2.clientX) / 2 - rect.left
+      const centerY = (touch1.clientY + touch2.clientY) / 2 - rect.top
 
       // Calculate center point movement (panning while pinching)
       const centerDeltaX = centerX - lastPinchCenter.x
@@ -354,8 +469,10 @@ function handleTouchEnd(e) {
   if (touches.length === 1 && !isPinching) {
     // Single touch remains, restart panning if on viewport/world
     const remainingTouch = touches[0]
-    if (document.elementFromPoint(remainingTouch.clientX, remainingTouch.clientY) === viewport ||
-      document.elementFromPoint(remainingTouch.clientX, remainingTouch.clientY) === world) {
+    if (
+      document.elementFromPoint(remainingTouch.clientX, remainingTouch.clientY) === viewport ||
+      document.elementFromPoint(remainingTouch.clientX, remainingTouch.clientY) === world
+    ) {
       isTouchPanning = true
       touchPanStart.x = remainingTouch.clientX
       touchPanStart.y = remainingTouch.clientY
@@ -371,6 +488,192 @@ function getPinchDistance(touch1, touch2) {
   const dx = touch1.clientX - touch2.clientX
   const dy = touch1.clientY - touch2.clientY
   return Math.sqrt(dx * dx + dy * dy)
+}
+
+// Global mouse handlers for note interactions
+function handleGlobalMouseMove(e) {
+  if (isResizingNote && noteResizeData && currentNote) {
+    // Calculate mouse delta from initial position
+    const deltaX = e.clientX - noteResizeData.startMouseX
+    const deltaY = e.clientY - noteResizeData.startMouseY
+
+    // Apply delta to initial size, accounting for zoom
+    const newWidth = Math.max(150, noteResizeData.startWidth + deltaX / state.zoom)
+    const newHeight = Math.max(150, noteResizeData.startHeight + deltaY / state.zoom)
+
+    // Update the container size (world coordinates)
+    noteResizeData.container.style.width = `${newWidth}px`
+    noteResizeData.container.style.height = `${newHeight}px`
+
+    // Update the note data
+    currentNote.width = newWidth
+    currentNote.height = newHeight
+    return
+  }
+
+  if (isDraggingNote && noteDragData && currentNote) {
+    noteDragData.hasMoved = true
+    noteDragData.noteElement.style.cursor = 'grabbing'
+
+    const rect = viewport.getBoundingClientRect()
+    const mouseX = e.clientX - rect.left
+    const mouseY = e.clientY - rect.top
+
+    // Convert to world coordinates and maintain the click offset
+    const worldX = (mouseX - noteDragData.dragOffset.x - state.panX) / state.zoom
+    const worldY = (mouseY - noteDragData.dragOffset.y - state.panY) / state.zoom
+
+    currentNote.x = worldX
+    currentNote.y = worldY
+    noteDragData.container.style.left = `${worldX}px`
+    noteDragData.container.style.top = `${worldY}px`
+    e.preventDefault()
+  }
+}
+
+function handleGlobalMouseUp() {
+  if (isResizingNote && noteResizeData && currentNote) {
+    isResizingNote = false
+
+    // Snap resize to 10x10 grid
+    const gridSize = 10
+    const snappedWidth = Math.round(currentNote.width / gridSize) * gridSize
+    const snappedHeight = Math.round(currentNote.height / gridSize) * gridSize
+
+    // Update note size to snapped coordinates
+    currentNote.width = Math.max(150, snappedWidth)
+    currentNote.height = Math.max(150, snappedHeight)
+    noteResizeData.container.style.width = `${currentNote.width}px`
+    noteResizeData.container.style.height = `${currentNote.height}px`
+
+    noteResizeData.noteElement.style.cursor = noteResizeData.noteElement.matches(':focus')
+      ? 'text'
+      : 'grab'
+    noteResizeData = null
+    currentNote = null
+    saveState()
+  }
+
+  if (isDraggingNote && noteDragData && currentNote) {
+    isDraggingNote = false
+    noteDragData.noteElement.style.cursor = ''
+    noteDragData.noteElement.style.userSelect = ''
+
+    if (noteDragData.hasMoved) {
+      // Snap to 10x10 grid
+      const gridSize = 10
+      const snappedX = Math.round(currentNote.x / gridSize) * gridSize
+      const snappedY = Math.round(currentNote.y / gridSize) * gridSize
+
+      // Update note position to snapped coordinates
+      currentNote.x = snappedX
+      currentNote.y = snappedY
+      noteDragData.container.style.left = `${snappedX}px`
+      noteDragData.container.style.top = `${snappedY}px`
+
+      saveState()
+    } else {
+      // If didn't move, focus the textarea for editing
+      setTimeout(() => {
+        noteDragData.noteElement.focus()
+      }, 10)
+    }
+
+    noteDragData = null
+    currentNote = null
+  }
+}
+
+// Global touch handlers for note interactions
+function handleGlobalTouchMove(e) {
+  if (isResizingNote && noteResizeData && currentNote && e.touches.length === 1) {
+    const touch = e.touches[0]
+    const deltaX = touch.clientX - noteResizeData.startTouchX
+    const deltaY = touch.clientY - noteResizeData.startTouchY
+
+    const newWidth = Math.max(150, noteResizeData.startWidth + deltaX / state.zoom)
+    const newHeight = Math.max(150, noteResizeData.startHeight + deltaY / state.zoom)
+
+    noteResizeData.container.style.width = `${newWidth}px`
+    noteResizeData.container.style.height = `${newHeight}px`
+    currentNote.width = newWidth
+    currentNote.height = newHeight
+    e.preventDefault()
+    return
+  }
+
+  if (isDraggingNote && noteDragData && currentNote && e.touches.length === 1) {
+    noteDragData.hasMoved = true
+    noteDragData.noteElement.style.cursor = 'grabbing'
+
+    const rect = viewport.getBoundingClientRect()
+    const touch = e.touches[0]
+    const mouseX = touch.clientX - rect.left
+    const mouseY = touch.clientY - rect.top
+
+    // Convert to world coordinates and maintain the click offset
+    const worldX = (mouseX - noteDragData.dragOffset.x - state.panX) / state.zoom
+    const worldY = (mouseY - noteDragData.dragOffset.y - state.panY) / state.zoom
+
+    currentNote.x = worldX
+    currentNote.y = worldY
+    noteDragData.container.style.left = `${worldX}px`
+    noteDragData.container.style.top = `${worldY}px`
+    e.preventDefault()
+  }
+}
+
+function handleGlobalTouchEnd(e) {
+  if (isResizingNote && noteResizeData && currentNote) {
+    isResizingNote = false
+
+    // Snap resize to 10x10 grid
+    const gridSize = 10
+    const snappedWidth = Math.round(currentNote.width / gridSize) * gridSize
+    const snappedHeight = Math.round(currentNote.height / gridSize) * gridSize
+
+    // Update note size to snapped coordinates
+    currentNote.width = Math.max(150, snappedWidth)
+    currentNote.height = Math.max(150, snappedHeight)
+    noteResizeData.container.style.width = `${currentNote.width}px`
+    noteResizeData.container.style.height = `${currentNote.height}px`
+
+    noteResizeData.noteElement.style.cursor = noteResizeData.noteElement.matches(':focus')
+      ? 'text'
+      : 'grab'
+    noteResizeData = null
+    currentNote = null
+    saveState()
+  }
+
+  if (isDraggingNote && noteDragData && currentNote) {
+    isDraggingNote = false
+    noteDragData.noteElement.style.cursor = ''
+    noteDragData.noteElement.style.userSelect = ''
+
+    if (noteDragData.hasMoved) {
+      // Snap to 10x10 grid
+      const gridSize = 10
+      const snappedX = Math.round(currentNote.x / gridSize) * gridSize
+      const snappedY = Math.round(currentNote.y / gridSize) * gridSize
+
+      // Update note position to snapped coordinates
+      currentNote.x = snappedX
+      currentNote.y = snappedY
+      noteDragData.container.style.left = `${snappedX}px`
+      noteDragData.container.style.top = `${snappedY}px`
+
+      saveState()
+    } else {
+      // If didn't move, focus the textarea for editing
+      setTimeout(() => {
+        noteDragData.noteElement.focus()
+      }, 10)
+    }
+
+    noteDragData = null
+    currentNote = null
+  }
 }
 
 // Create a new note at screen position
@@ -391,7 +694,7 @@ function createNoteAtPosition(screenX, screenY) {
     height: 150,
     content: '',
     color: 'rgba(255, 245, 157, 0.95)',
-    zIndex: ++state.maxZIndex
+    zIndex: ++state.maxZIndex,
   }
 
   state.notes.push(note)
@@ -442,16 +745,16 @@ function renderNote(note) {
 
   // Define 10 saturated colors
   const colors = [
-    'rgba(255, 255, 255, 0.95)',  // White
-    'rgba(255, 200, 200, 0.95)',  // Soft red
-    'rgba(255, 220, 170, 0.95)',  // Soft orange
-    'rgba(255, 245, 157, 0.95)',  // Soft yellow
-    'rgba(200, 255, 200, 0.95)',  // Soft green
-    'rgba(173, 216, 230, 0.95)',  // Soft blue
-    'rgba(221, 160, 221, 0.95)',  // Soft purple
-    'rgba(255, 182, 193, 0.95)',  // Soft pink
-    'rgba(255, 218, 185, 0.95)',  // Soft peach
-    'rgba(211, 211, 211, 0.95)'   // Light gray
+    'rgba(255, 255, 255, 0.95)', // White
+    'rgba(255, 200, 200, 0.95)', // Soft red
+    'rgba(255, 220, 170, 0.95)', // Soft orange
+    'rgba(255, 245, 157, 0.95)', // Soft yellow
+    'rgba(200, 255, 200, 0.95)', // Soft green
+    'rgba(173, 216, 230, 0.95)', // Soft blue
+    'rgba(221, 160, 221, 0.95)', // Soft purple
+    'rgba(255, 182, 193, 0.95)', // Soft pink
+    'rgba(255, 218, 185, 0.95)', // Soft peach
+    'rgba(211, 211, 211, 0.95)', // Light gray
   ]
 
   colors.forEach(color => {
@@ -521,7 +824,7 @@ function renderNote(note) {
   })
 
   // Hide palette when clicking elsewhere
-  document.addEventListener('click', (e) => {
+  document.addEventListener('click', e => {
     if (!colorBtn.contains(e.target) && !colorPalette.contains(e.target)) {
       // Reset to original color when closing without selection
       note.color = originalColor
@@ -575,10 +878,6 @@ function renderNote(note) {
     noteElement.style.cursor = 'text'
   })
 
-  // Resize handling
-  let isResizing = false
-  let resizeData = null
-
   // Mouse-based resize
   container.addEventListener('mousedown', e => {
     bringToFront()
@@ -594,12 +893,15 @@ function renderNote(note) {
 
     // Check if clicking in bottom-right resize handle area (40x40 px)
     if (x > rect.width - 40 && y > rect.height - 40) {
-      isResizing = true
-      resizeData = {
+      isResizingNote = true
+      currentNote = note
+      noteResizeData = {
         startWidth: note.width,
         startHeight: note.height,
         startMouseX: e.clientX,
-        startMouseY: e.clientY
+        startMouseY: e.clientY,
+        container: container,
+        noteElement: noteElement,
       }
       noteElement.style.cursor = 'nw-resize'
       e.preventDefault()
@@ -611,215 +913,224 @@ function renderNote(note) {
   })
 
   // Touch-based resize
-  container.addEventListener('touchstart', function (e) {
-    if (e.touches.length !== 1) return
-    bringToFront()
-    const rect = container.getBoundingClientRect()
-    const touch = e.touches[0]
-    const x = touch.clientX - rect.left
-    const y = touch.clientY - rect.top
-    if (x > rect.width - 40 && y > rect.height - 40) {
-      isResizing = true
-      resizeData = {
-        startWidth: note.width,
-        startHeight: note.height,
-        startTouchX: touch.clientX,
-        startTouchY: touch.clientY
-      }
-      noteElement.style.cursor = 'nw-resize'
-      e.preventDefault()
-      e.stopPropagation()
-    }
-  }, { passive: false })
-
-  container.addEventListener('touchmove', function (e) {
-    if (isResizing && resizeData && e.touches.length === 1) {
+  container.addEventListener(
+    'touchstart',
+    function (e) {
+      if (e.touches.length !== 1) return
+      bringToFront()
+      const rect = container.getBoundingClientRect()
       const touch = e.touches[0]
-      const deltaX = touch.clientX - resizeData.startTouchX
-      const deltaY = touch.clientY - resizeData.startTouchY
-      const newWidth = Math.max(150, resizeData.startWidth + deltaX / state.zoom)
-      const newHeight = Math.max(150, resizeData.startHeight + deltaY / state.zoom)
-      container.style.width = `${newWidth}px`
-      container.style.height = `${newHeight}px`
-      note.width = newWidth
-      note.height = newHeight
-      e.preventDefault()
-    }
-  }, { passive: false })
+      const x = touch.clientX - rect.left
+      const y = touch.clientY - rect.top
+      if (x > rect.width - 40 && y > rect.height - 40) {
+        isResizingNote = true
+        currentNote = note
+        noteResizeData = {
+          startWidth: note.width,
+          startHeight: note.height,
+          startTouchX: touch.clientX,
+          startTouchY: touch.clientY,
+          container: container,
+          noteElement: noteElement,
+        }
+        noteElement.style.cursor = 'nw-resize'
+        e.preventDefault()
+        e.stopPropagation()
+      }
+    },
+    { passive: false },
+  )
 
-  container.addEventListener('touchend', function (e) {
-    if (isResizing) {
-      isResizing = false
-      resizeData = null
-      // Snap resize to 10x10 grid
-      const gridSize = 10
-      const snappedWidth = Math.round(note.width / gridSize) * gridSize
-      const snappedHeight = Math.round(note.height / gridSize) * gridSize
-      note.width = Math.max(150, snappedWidth)
-      note.height = Math.max(150, snappedHeight)
-      container.style.width = `${note.width}px`
-      container.style.height = `${note.height}px`
-      noteElement.style.cursor = noteElement.matches(':focus') ? 'text' : 'grab'
-      saveState()
-    }
-  })
+  // Mouse-based interaction (tap to focus vs drag to move)
+  let noteMouseData = null
+  const NOTE_DRAG_THRESHOLD = 5 // pixels
 
-  // Handle drag (move note)
-  let isDraggingNote = false
-  let dragOffset = { x: 0, y: 0 }
-  let dragStart = { x: 0, y: 0 }
-  let hasMoved = false
-
-  // Mouse-based dragging
   noteElement.addEventListener('mousedown', e => {
-    if (isResizing) return
+    if (isResizingNote) return
 
-    // Don't start dragging if clicking buttons
+    // If already focused, let textarea handle mouse normally
+    if (noteElement.matches(':focus')) return
+
+    // Don't start interaction if clicking buttons
     if (e.target === colorBtn || e.target === deleteBtn || colorPalette.contains(e.target)) {
       return
     }
 
-    // Don't start dragging if textarea is focused and click is inside it
-    if (noteElement.matches(':focus')) {
-      return
-    }
-
-    isDraggingNote = true
-    hasMoved = false
-    dragStart.x = e.clientX
-    dragStart.y = e.clientY
-
-    // Calculate offset from where user clicked within the note
+    // Start tracking the interaction
     const rect = container.getBoundingClientRect()
-    dragOffset.x = e.clientX - rect.left
-    dragOffset.y = e.clientY - rect.top
+    noteMouseData = {
+      startX: e.clientX,
+      startY: e.clientY,
+      startTime: Date.now(),
+      dragOffset: {
+        x: e.clientX - rect.left,
+        y: e.clientY - rect.top,
+      },
+      container: container,
+      noteElement: noteElement,
+      wasFocused: noteElement.matches(':focus'),
+      hasMoved: false,
+      isDragging: false,
+    }
 
     noteElement.style.userSelect = 'none'
     e.preventDefault()
   })
 
-  // Touch-based dragging
-  noteElement.addEventListener('touchstart', function (e) {
-    if (isResizing || e.touches.length !== 1) return
-    // Don't start dragging if touching buttons or palette
-    if (e.target === colorBtn || e.target === deleteBtn || colorPalette.contains(e.target)) {
-      return
-    }
-    // Don't start dragging if in resize area
-    const rect = container.getBoundingClientRect()
-    const touch = e.touches[0]
-    const x = touch.clientX - rect.left
-    const y = touch.clientY - rect.top
-    if (x > rect.width - 40 && y > rect.height - 40) return
-    // Don't start dragging if textarea is focused
-    if (noteElement.matches(':focus')) return
-    isDraggingNote = true
-    hasMoved = false
-    dragStart.x = touch.clientX
-    dragStart.y = touch.clientY
-    dragOffset.x = touch.clientX - rect.left
-    dragOffset.y = touch.clientY - rect.top
-    noteElement.style.userSelect = 'none'
-    e.preventDefault()
-  }, { passive: false })
+  noteElement.addEventListener('mousemove', e => {
+    if (!noteMouseData) return
 
-  document.addEventListener('touchmove', function (e) {
-    if (isDraggingNote && e.touches.length === 1) {
-      hasMoved = true
+    const deltaX = Math.abs(e.clientX - noteMouseData.startX)
+    const deltaY = Math.abs(e.clientY - noteMouseData.startY)
+
+    // If movement exceeds threshold and not already dragging, start drag
+    if (
+      (deltaX > NOTE_DRAG_THRESHOLD || deltaY > NOTE_DRAG_THRESHOLD) &&
+      !noteMouseData.isDragging
+    ) {
+      noteMouseData.isDragging = true
+      noteMouseData.hasMoved = true
+      isDraggingNote = true
+      currentNote = note
+      noteDragData = {
+        hasMoved: true,
+        dragOffset: noteMouseData.dragOffset,
+        container: noteMouseData.container,
+        noteElement: noteMouseData.noteElement,
+      }
       noteElement.style.cursor = 'grabbing'
-      const rect = viewport.getBoundingClientRect()
-      const touch = e.touches[0]
-      const mouseX = touch.clientX - rect.left
-      const mouseY = touch.clientY - rect.top
-      // Convert to world coordinates and maintain the click offset
-      const worldX = (mouseX - dragOffset.x - state.panX) / state.zoom
-      const worldY = (mouseY - dragOffset.y - state.panY) / state.zoom
-      note.x = worldX
-      note.y = worldY
-      container.style.left = `${worldX}px`
-      container.style.top = `${worldY}px`
-      e.preventDefault()
     }
-  }, { passive: false })
+  })
 
-  document.addEventListener('touchend', function (e) {
-    if (isDraggingNote) {
-      isDraggingNote = false
-      noteElement.style.cursor = ''
-      noteElement.style.userSelect = ''
-      if (hasMoved) {
-        // Snap to 10x10 grid
-        const gridSize = 10
-        const snappedX = Math.round(note.x / gridSize) * gridSize
-        const snappedY = Math.round(note.y / gridSize) * gridSize
-        note.x = snappedX
-        note.y = snappedY
-        container.style.left = `${snappedX}px`
-        container.style.top = `${snappedY}px`
-        saveState()
-      } else {
-        // If didn't move, focus the textarea for editing
-        setTimeout(() => {
-          noteElement.focus()
-        }, 10)
+  noteElement.addEventListener('mouseup', e => {
+    if (!noteMouseData) return
+
+    // If no significant movement occurred, it's a tap
+    if (!noteMouseData.hasMoved) {
+      // Only focus if textarea wasn't already focused
+      if (!noteMouseData.wasFocused) {
+        noteElement.focus()
       }
     }
-  }, { passive: false })
 
-  // --- Touch-to-focus for textarea on mobile ---
-  let noteTapStartTime = 0
-  let noteTapStartX = 0
-  let noteTapStartY = 0
-  let noteTapMoved = false
-  let noteTapFocusTimer = null
-  const NOTE_TAP_MAX_DURATION = 250
-  const NOTE_TAP_MAX_MOVE = 10
+    // Reset tracking
+    noteMouseData = null
+    noteElement.style.userSelect = ''
+  })
 
-  noteElement.addEventListener('touchstart', function (e) {
-    if (e.touches.length !== 1) return
-    // Don't focus if in resize area or on button/palette
+  // Touch-based interaction (tap to focus vs drag to move)
+  let noteTouchData = null
+  const NOTE_TOUCH_DRAG_THRESHOLD = 10 // pixels (slightly higher for touch)
+
+  noteElement.addEventListener(
+    'touchstart',
+    function (e) {
+      if (isResizingNote || e.touches.length !== 1) return
+      // Don't start interaction if touching buttons or palette
+      if (e.target === colorBtn || e.target === deleteBtn || colorPalette.contains(e.target)) {
+        return
+      }
+      // Don't start interaction if in resize area
+      const rect = container.getBoundingClientRect()
+      const touch = e.touches[0]
+      const x = touch.clientX - rect.left
+      const y = touch.clientY - rect.top
+      if (x > rect.width - 40 && y > rect.height - 40) return
+
+      // Start tracking the touch interaction
+      noteTouchData = {
+        startX: touch.clientX,
+        startY: touch.clientY,
+        startTime: Date.now(),
+        dragOffset: {
+          x: touch.clientX - rect.left,
+          y: touch.clientY - rect.top,
+        },
+        container: container,
+        noteElement: noteElement,
+        wasFocused: noteElement.matches(':focus'),
+        hasMoved: false,
+        isDragging: false,
+      }
+
+      noteElement.style.userSelect = 'none'
+      e.preventDefault()
+    },
+    { passive: false },
+  )
+
+  noteElement.addEventListener(
+    'touchmove',
+    function (e) {
+      if (!noteTouchData || e.touches.length !== 1) return
+
+      const touch = e.touches[0]
+      const deltaX = Math.abs(touch.clientX - noteTouchData.startX)
+      const deltaY = Math.abs(touch.clientY - noteTouchData.startY)
+
+      // If movement exceeds threshold and not already dragging, start drag
+      if (
+        (deltaX > NOTE_TOUCH_DRAG_THRESHOLD || deltaY > NOTE_TOUCH_DRAG_THRESHOLD) &&
+        !noteTouchData.isDragging
+      ) {
+        noteTouchData.isDragging = true
+        noteTouchData.hasMoved = true
+        isDraggingNote = true
+        currentNote = note
+        noteDragData = {
+          hasMoved: true,
+          dragOffset: noteTouchData.dragOffset,
+          container: noteTouchData.container,
+          noteElement: noteTouchData.noteElement,
+        }
+        noteElement.style.cursor = 'grabbing'
+      }
+    },
+    { passive: false },
+  )
+
+  noteElement.addEventListener(
+    'touchend',
+    function (e) {
+      if (!noteTouchData) return
+
+      // If no significant movement occurred, it's a tap
+      if (!noteTouchData.hasMoved) {
+        // Only focus if textarea wasn't already focused
+        if (!noteTouchData.wasFocused) {
+          noteElement.focus()
+        }
+      }
+
+      // Reset tracking
+      noteTouchData = null
+      noteElement.style.userSelect = ''
+    },
+    { passive: false },
+  )
+
+  // Cursor management for resize handle
+  container.addEventListener('mousemove', e => {
+    if (isDraggingNote || isResizingNote) return
+
     const rect = container.getBoundingClientRect()
-    const touch = e.touches[0]
-    const x = touch.clientX - rect.left
-    const y = touch.clientY - rect.top
-    if (x > rect.width - 40 && y > rect.height - 40) return
-    if (e.target === colorBtn || e.target === deleteBtn || colorPalette.contains(e.target)) return
-    noteTapStartTime = Date.now()
-    noteTapMoved = false
-    noteTapStartX = touch.clientX
-    noteTapStartY = touch.clientY
-  }, { passive: false })
+    const x = e.clientX - rect.left
+    const y = e.clientY - rect.top
 
-  noteElement.addEventListener('touchmove', function (e) {
-    if (e.touches.length !== 1) return
-    const dx = e.touches[0].clientX - noteTapStartX
-    const dy = e.touches[0].clientY - noteTapStartY
-    if (Math.abs(dx) > NOTE_TAP_MAX_MOVE || Math.abs(dy) > NOTE_TAP_MAX_MOVE) {
-      noteTapMoved = true
+    if (x > rect.width - 40 && y > rect.height - 40) {
+      noteElement.style.cursor = 'nw-resize'
+    } else if (noteElement.matches(':focus')) {
+      noteElement.style.cursor = 'text'
+    } else {
+      noteElement.style.cursor = 'grab'
     }
-  }, { passive: false })
+  })
 
-  noteElement.addEventListener('touchend', function (e) {
-    if (e.changedTouches.length !== 1) return
-    if (noteTapMoved) return
-    const now = Date.now()
-    if (now - noteTapStartTime > NOTE_TAP_MAX_DURATION) return
-    // Cancel if double tap detected
-    if (doubleTapDetected) return
-    // Only focus if not on button/palette/resize
-    const rect = container.getBoundingClientRect()
-    const touch = e.changedTouches[0]
-    const x = touch.clientX - rect.left
-    const y = touch.clientY - rect.top
-    if (x > rect.width - 40 && y > rect.height - 40) return
-    if (e.target === colorBtn || e.target === deleteBtn || colorPalette.contains(e.target)) return
-    // Use a timer to avoid race with double tap
-    if (noteTapFocusTimer) clearTimeout(noteTapFocusTimer)
-    noteTapFocusTimer = setTimeout(() => {
-      if (!doubleTapDetected) noteElement.focus()
-      noteTapFocusTimer = null
-    }, DOUBLE_TAP_DELAY)
-  }, { passive: false })
+  container.addEventListener('mouseleave', () => {
+    if (!isDraggingNote && !isResizingNote) {
+      noteElement.style.cursor = noteElement.matches(':focus') ? 'text' : 'grab'
+    }
+  })
 
   world.appendChild(container)
 }
@@ -861,13 +1172,114 @@ function initDB() {
       resolve(db)
     }
 
-    request.onupgradeneeded = (event) => {
+    request.onupgradeneeded = event => {
       const db = event.target.result
       if (!db.objectStoreNames.contains('state')) {
         db.createObjectStore('state', { keyPath: 'id' })
       }
     }
   })
+}
+
+// Request persistent storage to prevent data loss
+async function requestPersistentStorage() {
+  if ('storage' in navigator && 'persist' in navigator.storage) {
+    try {
+      const persistent = await navigator.storage.persist()
+      if (persistent) {
+        console.log('✓ Persistent storage granted - your data is protected')
+      } else {
+        console.warn('⚠ Persistent storage denied - data may be cleared by browser')
+      }
+      return persistent
+    } catch (error) {
+      console.warn('Failed to request persistent storage:', error)
+      return false
+    }
+  } else {
+    console.warn('Persistent storage API not supported')
+    return false
+  }
+}
+
+// Monitor storage usage and quota
+async function checkStorageQuota() {
+  if ('storage' in navigator && 'estimate' in navigator.storage) {
+    try {
+      const estimate = await navigator.storage.estimate()
+      const usedMB = Math.round((estimate.usage || 0) / 1024 / 1024)
+      const quotaMB = Math.round((estimate.quota || 0) / 1024 / 1024)
+      const usagePercent = estimate.quota ? Math.round((estimate.usage / estimate.quota) * 100) : 0
+
+      console.log(`Storage: ${usedMB}MB used of ${quotaMB}MB (${usagePercent}%)`)
+
+      // Warn if storage is getting full (over 80%)
+      if (usagePercent > 80) {
+        console.warn('⚠ Storage quota is getting full - consider backing up your notes')
+      }
+
+      return {
+        used: estimate.usage,
+        quota: estimate.quota,
+        percent: usagePercent,
+      }
+    } catch (error) {
+      console.warn('Failed to check storage quota:', error)
+      return null
+    }
+  } else {
+    console.warn('Storage estimate API not supported')
+    return null
+  }
+}
+
+// Check if storage is persistent
+async function checkStoragePersistence() {
+  if ('storage' in navigator && 'persisted' in navigator.storage) {
+    try {
+      const persistent = await navigator.storage.persisted()
+      console.log(persistent ? '✓ Storage is persistent' : '⚠ Storage is not persistent')
+      return persistent
+    } catch (error) {
+      console.warn('Failed to check storage persistence:', error)
+      return false
+    }
+  } else {
+    return false
+  }
+}
+
+// Enhanced storage initialization
+async function initStorage() {
+  console.log('🔧 Initializing storage...')
+
+  // Check current storage status
+  await checkStoragePersistence()
+  await checkStorageQuota()
+
+  // Request persistent storage
+  const persistent = await requestPersistentStorage()
+
+  // Initialize IndexedDB
+  await initDB()
+
+  // Set up storage monitoring
+  if ('storage' in navigator) {
+    // Monitor storage changes (if supported)
+    try {
+      // Some browsers support storage event listeners
+      if ('addEventListener' in navigator.storage) {
+        navigator.storage.addEventListener('quotachange', () => {
+          console.log('Storage quota changed')
+          checkStorageQuota()
+        })
+      }
+    } catch (error) {
+      // Ignore if not supported
+    }
+  }
+
+  return { persistent, db }
 }
 
 function saveToIndexedDB(data) {
@@ -920,6 +1332,88 @@ async function saveState() {
     } catch (fallbackError) {
       console.warn('Fallback to localStorage also failed:', fallbackError)
     }
+  }
+}
+
+// Export data for backup
+function exportData() {
+  const exportData = {
+    version: 1,
+    exported: new Date().toISOString(),
+    state: state,
+  }
+
+  const dataStr = JSON.stringify(exportData, null, 2)
+  const dataBlob = new Blob([dataStr], { type: 'application/json' })
+
+  const link = document.createElement('a')
+  link.href = URL.createObjectURL(dataBlob)
+  link.download = `infinote-backup-${new Date().toISOString().split('T')[0]}.json`
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+
+  console.log('📁 Data exported successfully')
+
+  // Update last backup time
+  localStorage.setItem('infinote-last-backup', Date.now().toString())
+}
+
+// Import data from backup
+function importData(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = async e => {
+      try {
+        const importData = JSON.parse(e.target.result)
+
+        if (importData.version && importData.state) {
+          // Clear existing notes
+          document.querySelectorAll('.note-container').forEach(container => container.remove())
+
+          // Load imported state
+          state = { ...state, ...importData.state }
+
+          // Render imported notes
+          state.notes.forEach(note => renderNote(note))
+
+          updateTransform()
+          updateUI()
+          await saveState()
+
+          console.log('📥 Data imported successfully')
+          resolve(true)
+        } else {
+          throw new Error('Invalid backup file format')
+        }
+      } catch (error) {
+        console.error('Failed to import data:', error)
+        reject(error)
+      }
+    }
+    reader.readAsText(file)
+  })
+}
+
+// Check if backup reminder is needed
+function checkBackupReminder() {
+  // Only suggest backup if there are notes
+  if (state.notes.length === 0) return
+
+  const lastBackup = localStorage.getItem('infinote-last-backup')
+  const backupReminderShown = localStorage.getItem('infinote-backup-reminder-shown')
+  const now = Date.now()
+
+  // Suggest backup if:
+  // 1. Never backed up and has notes for 24+ hours, or
+  // 2. Last backup was 30+ days ago
+  const shouldRemind = !lastBackup
+    ? now - (state.notes[0]?.id || now) > 24 * 60 * 60 * 1000 // 24 hours since first note
+    : now - parseInt(lastBackup) > 30 * 24 * 60 * 60 * 1000 // 30 days since last backup
+
+  if (shouldRemind && !backupReminderShown) {
+    console.log('💾 Consider backing up your notes - check console for exportData() function')
+    localStorage.setItem('infinote-backup-reminder-shown', now.toString())
   }
 }
 
@@ -1083,3 +1577,5 @@ if (document.readyState === 'loading') {
 
 // Make control functions global for onclick handlers
 window.resetView = resetView
+window.exportData = exportData
+window.importData = importData
