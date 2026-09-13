@@ -55,7 +55,9 @@ const world = document.getElementById('world')
 // Constants
 const MIN_ZOOM = 0.1
 const MAX_ZOOM = 5
-const ZOOM_FACTOR = 0.05
+const RESIZE_AREA_SIZE = 40 // World pixels; scales with the card's zoom
+const ZOOM_SENSITIVITY = 0.25 // Strength of the logarithmic scroll response
+const ZOOM_DISTANCE = 100 // Pixel distance used to shape the scroll curve
 const STORAGE_KEY = 'infinote-state'
 
 let doubleTapDetected = false
@@ -120,6 +122,19 @@ function handleInstructions() {
 
 // Event listeners
 function attachEventListeners() {
+  document.getElementById('import-file').addEventListener('change', async e => {
+    const file = e.target.files[0]
+    e.target.value = '' // Allow selecting the same backup again.
+    if (!file || !confirm('Import backup file? This will replace all current notes.')) return
+
+    try {
+      await importData(file)
+    } catch (error) {
+      console.error('Failed to import backup:', error)
+      alert('Failed to import backup file. Please check the file format.')
+    }
+  })
+
   // Mouse events for panning and note creation
   viewport.addEventListener('mousedown', handleMouseDown)
   viewport.addEventListener('mousemove', handleMouseMove)
@@ -339,9 +354,15 @@ function handleDoubleClick(e) {
 
 // Wheel event for zooming
 function handleWheel(e) {
-  // Don't zoom if wheeling inside a focused textarea
+  // Scroll focused text while there is room in the wheel's direction; zoom at its edges.
   if (e.target.tagName === 'TEXTAREA' && e.target.matches(':focus')) {
-    return
+    const textarea = e.target
+    const maxScrollTop = textarea.scrollHeight - textarea.clientHeight
+    const canScroll = maxScrollTop > 1 && (
+      (e.deltaY < 0 && textarea.scrollTop > 1) ||
+      (e.deltaY > 0 && textarea.scrollTop < maxScrollTop - 1)
+    )
+    if (canScroll) return
   }
 
   e.preventDefault()
@@ -354,9 +375,12 @@ function handleWheel(e) {
   const worldX = (mouseX - state.panX) / state.zoom
   const worldY = (mouseY - state.panY) / state.zoom
 
-  // Update zoom
-  const zoomDelta = e.deltaY > 0 ? (-ZOOM_FACTOR * state.zoom) / 2 : (ZOOM_FACTOR * state.zoom) / 2
-  const newZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, state.zoom + zoomDelta))
+  // Normalize scroll distance to pixels, then update zoom on a logarithmic scale.
+  const deltaUnit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? viewport.clientHeight : 1
+  const scrollDistance = e.deltaY * deltaUnit
+  const zoomDelta = Math.sign(scrollDistance) * Math.log1p(Math.abs(scrollDistance) / ZOOM_DISTANCE)
+  const logZoom = Math.log(state.zoom) - zoomDelta * ZOOM_SENSITIVITY
+  const newZoom = Math.exp(Math.max(Math.log(MIN_ZOOM), Math.min(Math.log(MAX_ZOOM), logZoom)))
 
   // Calculate new pan to keep mouse position constant in world space
   state.panX = mouseX - worldX * newZoom
@@ -743,9 +767,25 @@ function renderNote(note) {
   const colorPalette = document.createElement('div')
   colorPalette.className = 'color-palette'
 
-  // Define 10 saturated colors
+  // Delete replaces the white color option in the palette.
+  const deleteBtn = document.createElement('button')
+  deleteBtn.type = 'button'
+  deleteBtn.className = 'palette-delete'
+  deleteBtn.title = 'Delete note'
+  deleteBtn.setAttribute('aria-label', 'Delete note')
+  deleteBtn.innerHTML = `
+    <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" aria-hidden="true">
+      <path d="M3 3L9 9"/>
+      <path d="M9 3L3 9"/>
+    </svg>
+  `
+  deleteBtn.addEventListener('click', e => {
+    e.stopPropagation()
+    deleteNote(note)
+  })
+
+  // Define note colors
   const colors = [
-    'rgba(255, 255, 255, 0.95)', // White
     'rgba(255, 200, 200, 0.95)', // Soft red
     'rgba(255, 220, 170, 0.95)', // Soft orange
     'rgba(255, 245, 157, 0.95)', // Soft yellow
@@ -787,6 +827,7 @@ function renderNote(note) {
 
     colorPalette.appendChild(colorOption)
   })
+  colorPalette.insertBefore(deleteBtn, colorPalette.children[4])
 
   let originalColor = note.color
 
@@ -834,20 +875,6 @@ function renderNote(note) {
     }
   })
 
-  // Create delete button
-  const deleteBtn = document.createElement('button')
-  deleteBtn.className = 'delete-btn'
-  deleteBtn.innerHTML = `
-    <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="#000" stroke-width="1.3" stroke-linecap="square" style="display: block; opacity: 0.2;">
-      <path d="M4 4L8 8"/>
-      <path d="M8 4L4 8"/>
-    </svg>
-  `
-  deleteBtn.addEventListener('click', e => {
-    e.stopPropagation()
-    deleteNote(note)
-  })
-
   // Set note background color
   if (note.color) {
     noteElement.style.backgroundColor = note.color
@@ -857,7 +884,6 @@ function renderNote(note) {
   container.appendChild(noteElement)
   container.appendChild(colorBtn)
   container.appendChild(colorPalette)
-  container.appendChild(deleteBtn)
 
   // Bring to front on any interaction
   function bringToFront() {
@@ -891,8 +917,9 @@ function renderNote(note) {
       return
     }
 
-    // Check if clicking in bottom-right resize handle area (40x40 px)
-    if (x > rect.width - 40 && y > rect.height - 40) {
+    // Scale the bottom-right resize area with the card.
+    const resizeArea = RESIZE_AREA_SIZE * state.zoom
+    if (x > rect.width - resizeArea && y > rect.height - resizeArea) {
       isResizingNote = true
       currentNote = note
       noteResizeData = {
@@ -922,7 +949,8 @@ function renderNote(note) {
       const touch = e.touches[0]
       const x = touch.clientX - rect.left
       const y = touch.clientY - rect.top
-      if (x > rect.width - 40 && y > rect.height - 40) {
+      const resizeArea = RESIZE_AREA_SIZE * state.zoom
+      if (x > rect.width - resizeArea && y > rect.height - resizeArea) {
         isResizingNote = true
         currentNote = note
         noteResizeData = {
@@ -944,12 +972,23 @@ function renderNote(note) {
   // Mouse-based interaction (tap to focus vs drag to move)
   let noteMouseData = null
   const NOTE_DRAG_THRESHOLD = 5 // pixels
+  const isOnNoteEdge = (x, y, rect) => {
+    const edgeSize = 12 * state.zoom
+    return x < edgeSize || y < edgeSize ||
+      x > rect.width - edgeSize || y > rect.height - edgeSize
+  }
 
   noteElement.addEventListener('mousedown', e => {
     if (isResizingNote) return
 
-    // If already focused, let textarea handle mouse normally
-    if (noteElement.matches(':focus')) return
+    const rect = container.getBoundingClientRect()
+    const x = e.clientX - rect.left
+    const y = e.clientY - rect.top
+    const resizeArea = RESIZE_AREA_SIZE * state.zoom
+    if (x > rect.width - resizeArea && y > rect.height - resizeArea) return
+
+    // Focused text remains editable; its edges can still move the card.
+    if (noteElement.matches(':focus') && !isOnNoteEdge(x, y, rect)) return
 
     // Don't start interaction if clicking buttons
     if (e.target === colorBtn || e.target === deleteBtn || colorPalette.contains(e.target)) {
@@ -957,7 +996,6 @@ function renderNote(note) {
     }
 
     // Start tracking the interaction
-    const rect = container.getBoundingClientRect()
     noteMouseData = {
       startX: e.clientX,
       startY: e.clientY,
@@ -974,10 +1012,12 @@ function renderNote(note) {
     }
 
     noteElement.style.userSelect = 'none'
+    document.addEventListener('mousemove', handleNoteMouseMove)
+    document.addEventListener('mouseup', handleNoteMouseUp)
     e.preventDefault()
   })
 
-  noteElement.addEventListener('mousemove', e => {
+  function handleNoteMouseMove(e) {
     if (!noteMouseData) return
 
     const deltaX = Math.abs(e.clientX - noteMouseData.startX)
@@ -999,10 +1039,13 @@ function renderNote(note) {
         noteElement: noteMouseData.noteElement,
       }
       noteElement.style.cursor = 'grabbing'
+      handleGlobalMouseMove(e)
     }
-  })
+  }
 
-  noteElement.addEventListener('mouseup', e => {
+  function handleNoteMouseUp(e) {
+    document.removeEventListener('mousemove', handleNoteMouseMove)
+    document.removeEventListener('mouseup', handleNoteMouseUp)
     if (!noteMouseData) return
 
     // If no significant movement occurred, it's a tap
@@ -1016,7 +1059,7 @@ function renderNote(note) {
     // Reset tracking
     noteMouseData = null
     noteElement.style.userSelect = ''
-  })
+  }
 
   // Touch-based interaction (tap to focus vs drag to move)
   let noteTouchData = null
@@ -1035,7 +1078,9 @@ function renderNote(note) {
       const touch = e.touches[0]
       const x = touch.clientX - rect.left
       const y = touch.clientY - rect.top
-      if (x > rect.width - 40 && y > rect.height - 40) return
+      const resizeArea = RESIZE_AREA_SIZE * state.zoom
+      if (x > rect.width - resizeArea && y > rect.height - resizeArea) return
+      if (noteElement.matches(':focus') && !isOnNoteEdge(x, y, rect)) return
 
       // Start tracking the touch interaction
       noteTouchData = {
@@ -1117,8 +1162,11 @@ function renderNote(note) {
     const x = e.clientX - rect.left
     const y = e.clientY - rect.top
 
-    if (x > rect.width - 40 && y > rect.height - 40) {
+    const resizeArea = RESIZE_AREA_SIZE * state.zoom
+    if (x > rect.width - resizeArea && y > rect.height - resizeArea) {
       noteElement.style.cursor = 'nw-resize'
+    } else if (isOnNoteEdge(x, y, rect)) {
+      noteElement.style.cursor = 'grab'
     } else if (noteElement.matches(':focus')) {
       noteElement.style.cursor = 'text'
     } else {
@@ -1391,6 +1439,7 @@ function importData(file) {
         reject(error)
       }
     }
+    reader.onerror = () => reject(reader.error || new Error('Failed to read backup file'))
     reader.readAsText(file)
   })
 }
@@ -1444,6 +1493,57 @@ async function loadState() {
 }
 
 // Control functions
+function arrangeNotePositions(notes, gap = 12) {
+  const overlaps = (a, b) =>
+    a.x < b.x + b.width + gap && a.x + a.width + gap > b.x &&
+    a.y < b.y + b.height + gap && a.y + a.height + gap > b.y
+
+  for (const note of notes) {
+    const others = notes.filter(other => other !== note)
+    if (!others.some(other => overlaps(note, other))) continue
+
+    // Look for the nearest free position along the surrounding cards' edges.
+    const xs = new Set([note.x])
+    const ys = new Set([note.y])
+    for (const other of others) {
+      xs.add(other.x - note.width - gap)
+      xs.add(other.x + other.width + gap)
+      ys.add(other.y - note.height - gap)
+      ys.add(other.y + other.height + gap)
+    }
+
+    let best = null
+    let bestDistance = Infinity
+    for (const x of xs) {
+      for (const y of ys) {
+        const distance = (x - note.x) ** 2 + (y - note.y) ** 2
+        if (distance >= bestDistance) continue
+        const candidate = { x, y, width: note.width, height: note.height }
+        if (others.some(other => overlaps(candidate, other))) continue
+        best = candidate
+        bestDistance = distance
+      }
+    }
+
+    if (best) {
+      note.x = best.x
+      note.y = best.y
+    }
+  }
+}
+
+function arrangeNotes() {
+  arrangeNotePositions(state.notes)
+  const notesById = new Map(state.notes.map(note => [String(note.id), note]))
+  document.querySelectorAll('.note-container').forEach(container => {
+    const note = notesById.get(container.dataset.noteId)
+    if (!note) return
+    container.style.left = `${note.x}px`
+    container.style.top = `${note.y}px`
+  })
+  saveState()
+}
+
 function resetView() {
   if (state.notes.length === 0) {
     // No notes, just reset to origin
@@ -1577,5 +1677,6 @@ if (document.readyState === 'loading') {
 
 // Make control functions global for onclick handlers
 window.resetView = resetView
+window.arrangeNotes = arrangeNotes
 window.exportData = exportData
 window.importData = importData

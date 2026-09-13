@@ -20,7 +20,7 @@ A simple infinite canvas note-taking app.
 - **Drag notes** to move them around
 - **Resize** notes by dragging the bottom-right corner
 - **Change colors** using the color picker button
-- **Delete notes** using the X button
+- **Delete notes** using the X in the color palette
 
 ## Running locally
 

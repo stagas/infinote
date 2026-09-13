@@ -18,7 +18,7 @@ body {
   height: 100dvh;
   position: relative;
   overflow: hidden;
-  cursor: grab;
+  cursor: default;
 }
 
 #viewport.dragging {
@@ -76,40 +76,31 @@ body {
   opacity: 0.7;
 }
 
-.delete-btn {
-  position: absolute;
-  top: 4px;
-  right: 4px;
-  width: 18px;
-  height: 18px;
+.palette-delete {
+  width: 20px;
+  height: 20px;
   border: 2px solid rgba(0, 0, 0, 0.09);
   background: none;
   border-radius: 50%;
-  color: rgba(0, 0, 0, 0.2);
+  color: rgba(0, 0, 0, 0.09);
   font-size: 13px;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
-  opacity: 0;
   transition: all 0.2s ease;
-  z-index: 10;
   line-height: 1;
 }
 
-.note-container:hover .delete-btn {
-  opacity: 1;
-}
-
-.delete-btn:hover {
+.palette-delete:hover {
   border-color: rgba(0, 0, 0, 0.2);
-  color: rgba(0, 0, 0, 0.3);
+  color: rgba(0, 0, 0, 0.2);
 }
 
 .color-btn {
   position: absolute;
   top: 4px;
-  right: 26px;
+  right: 4px;
   width: 18px;
   height: 18px;
   border: 2px solid rgba(0, 0, 0, 0.09);
@@ -133,12 +124,7 @@ body {
 /* Show controls on mobile when textarea is focused */
 @media (hover: none) and (pointer: coarse) {
 
-  .note-container:focus-within .delete-btn,
   .note-container:focus-within .color-btn {
-    opacity: 1;
-  }
-
-  .note-container:focus-within .delete-btn:hover {
     opacity: 1;
   }
 
@@ -240,6 +226,7 @@ body {
   border: 1px solid rgba(255, 255, 255, 0.2);
 }
 
+.import-btn,
 .backup-btn {
   background: rgba(255, 255, 255, 0.1) !important;
   color: rgba(255, 255, 255, 0.7);
@@ -247,6 +234,7 @@ body {
 }
 
 .reset-view-btn:hover,
+.import-btn:hover,
 .backup-btn:hover {
   background: rgba(255, 255, 255, 0.2) !important;
   color: rgba(255, 255, 255, 0.9);
